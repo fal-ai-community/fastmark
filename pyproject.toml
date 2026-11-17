@@ -18,7 +18,7 @@ detect = ["scipy>=1.10"]
 test = ["pytest>=8", "opencv-python-headless>=4.8", "scipy>=1.10"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fastmark"]
+packages = ["fastmark"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
