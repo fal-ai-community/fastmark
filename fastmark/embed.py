@@ -187,7 +187,7 @@ def _kernel(device_index: int) -> Any:
 
 
 class CudaEmbedder:
-    """Per-(key, asset) device state; every ``embed_*`` call works in place.
+    """Per-key device state; every ``embed_*`` call works in place.
 
     Launches go on the caller's current CUDA stream and never synchronize.
     """
@@ -230,18 +230,6 @@ class CudaEmbedder:
             raise ValueError("packed yuv420p rows must be H*3//2")
         frames = packed.reshape(-1, rows, width)
         self._launch(frames, height=rows * 2 // 3, width=width, rgb=False)
-
-    def embed_luma(self, luma: Any, *, ylo: int = 16, yhi: int = 235) -> None:
-        """Mark a ``(N, H, W)`` or ``(H, W)`` uint8 luma plane."""
-        frames = luma[None] if luma.ndim == 2 else luma
-        self._launch(
-            frames,
-            height=int(frames.shape[1]),
-            width=int(frames.shape[2]),
-            rgb=False,
-            ylo=ylo,
-            yhi=yhi,
-        )
 
     def embed_rgb(self, frames: Any) -> None:
         """Mark ``(N, H, W, 3)`` or ``(H, W, 3)`` uint8 interleaved RGB."""

@@ -28,13 +28,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from fastmark.params import (
-    _BUMPS,
-    CarrierTables,
-    bits_to_int,
-    build_tables,
-    check_tag,
-)
+from fastmark.params import _BUMPS, CarrierTables, FastMarkParams, build_tables
 
 DEFAULT_SCALES = (1.0, 0.75, 0.5)
 LOG10_FPR_THRESHOLD = -9.0
@@ -51,10 +45,6 @@ class Detection:
     log10_fpr_bound: float  # union-bounded log10 P(false positive)
     scale: float
     offset: tuple[int, int]
-    identifier_recovered: int | None  # only when the keyed tag verifies
-    tag_ok: bool
-    bits: np.ndarray | None = None
-    bit_margin: float = 0.0
     pilot_agreement: float = 0.0
     stat_kind: str = ""
     attribution_status: str = (
@@ -73,11 +63,6 @@ class Detection:
             "watermark_detected": self.watermark_detected,
             "watermark_confidence": round(self.watermark_confidence, 3),
             "log10_false_positive_bound": round(self.log10_fpr_bound, 2),
-            "identifier_recovered": (
-                None
-                if self.identifier_recovered is None
-                else f"{self.identifier_recovered:x}"
-            ),
             "signed_manifest_found": self.signed_manifest_found,
             "signed_manifest_trusted": self.signed_manifest_trusted,
             "content_binding_match": self.content_binding_match,
@@ -110,7 +95,7 @@ def tile_patterns(tables: CarrierTables) -> np.ndarray:
     P, T, c = p.period, p.tile, p.cell
     nt = P // T
     sg = (
-        np.sign(tables.base[c // 2 :: c, c // 2 :: c])
+        np.sign(tables.carrier[c // 2 :: c, c // 2 :: c])
         .reshape(nt, 2, nt, 2)
         .transpose(0, 2, 1, 3)
         .reshape(nt, nt, 4)
@@ -233,7 +218,7 @@ def detect(
     P, T = p.period, p.tile
     nt = P // T
     pats = tile_patterns(tables)
-    ky, kx = np.nonzero(tables.pilot_mask)
+    ky, kx = np.nonzero(np.ones((nt, nt), bool))  # every tile is a pilot
     qy, qx = np.divmod(np.arange(nt * nt), nt)
     rows = (ky[None, :] + qy[:, None]) % nt
     cols = (kx[None, :] + qx[:, None]) % nt
@@ -276,8 +261,6 @@ def detect(
             0.0,
             1.0,
             (0, 0),
-            None,
-            False,
             attribution_status="insufficient_signal",
             frames=acc.frames,
         )
@@ -289,8 +272,6 @@ def detect(
         log10_fpr_bound=log10_fpr,
         scale=s,
         offset=((T * qy_ + ry) % P, (T * qx_ + rx) % P),
-        identifier_recovered=None,
-        tag_ok=False,
         pilot_agreement=float(agree_frac),
         stat_kind=kind,
         per_scale=per_scale,
@@ -306,32 +287,17 @@ def detect(
         )
         return det
     det.attribution_status = "mark_only"  # carrier presence is not authentication
-    if p.code_bits:
-        A = acc.scale(s)[ry, rx]
-        pm = tables.chip_bit >= 0
-        V = votes_at(A, pats, pm, (qy_, qx_))
-        cb = tables.chip_bit[pm]
-        L = p.code_bits
-        soft = np.zeros(L)
-        np.add.at(soft, cb, V)
-        bits = (soft > 0).astype(np.uint8)
-        det.bits = bits
-        det.bit_margin = float(np.abs(soft).min() / (np.abs(soft).mean() + 1e-12))
-        info, tag = bits[: p.payload_bits], bits[p.payload_bits :]
-        if np.array_equal(check_tag(tables.key, info, p.tag_bits), tag):
-            det.tag_ok = True
-            det.identifier_recovered = bits_to_int(info)
     return det
 
 
-def detector_tables(key: bytes, params) -> CarrierTables:
-    return build_tables(key, params, asset_id=None)
+def detector_tables(key: bytes, params: FastMarkParams) -> CarrierTables:
+    return build_tables(key, params)
 
 
 def detect_frames(
     frames_luma,
     key: bytes,
-    params,
+    params: FastMarkParams,
     scales=DEFAULT_SCALES,
     log10_fpr_threshold: float = LOG10_FPR_THRESHOLD,
 ) -> Detection:

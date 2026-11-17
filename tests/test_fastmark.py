@@ -1,3 +1,5 @@
+import hashlib
+
 import numpy as np
 import pytest
 
@@ -7,12 +9,7 @@ from fastmark.detector import (
     tile_patterns,
     votes_at,
 )
-from fastmark.params import (
-    FastMarkParams,
-    build_tables,
-    check_tag,
-    id_to_bits,
-)
+from fastmark.params import FastMarkParams, build_tables
 from fastmark.reference import embed_rgb, embed_y, luma_from_rgb
 
 KEY = b"\x01" * 32
@@ -34,15 +31,15 @@ def _content(n=4, h=768, w=1024, seed=0):
     return frames
 
 
-def _mark(frames, asset_id=0xABC123, params=P, key=KEY):
-    t = build_tables(key, params, asset_id=asset_id)
+def _mark(frames, params=P, key=KEY):
+    t = build_tables(key, params)
     return [embed_rgb(f, t)[0] for f in frames]
 
 
-def test_roundtrip_payload_and_fields():
+def test_roundtrip_and_public_fields():
     m = _mark(_content())
     d = detect_frames([luma_from_rgb(f) for f in m], KEY, P, scales=(1.0,))
-    assert d.watermark_detected and d.tag_ok and d.identifier_recovered == 0xABC123
+    assert d.watermark_detected
     assert d.log10_fpr_bound < -9
     pub = d.public()
     assert (
@@ -62,20 +59,11 @@ def test_wrong_key_and_unmarked_rejected():
     ).watermark_detected
 
 
-def test_tag_rejects_tampered_identifier():
-    info = id_to_bits(0xABC123, P.payload_bits)
-    tag = check_tag(KEY, info, P.tag_bits)
-    bad = info.copy()
-    bad[3] ^= 1
-    assert not np.array_equal(check_tag(KEY, bad, P.tag_bits), tag)
-    assert not np.array_equal(check_tag(b"\x02" * 32, info, P.tag_bits), tag)
-
-
 def test_chunking_and_session_independence():
     frames = _content(4)
-    t = build_tables(KEY, P, asset_id=5)
+    t = build_tables(KEY, P)
     whole = [embed_rgb(f, t)[0] for f in frames]
-    t2 = build_tables(KEY, P, asset_id=5)  # fresh session, same inputs
+    t2 = build_tables(KEY, P)  # fresh session, same inputs
     parts = [embed_rgb(f, t2)[0] for f in frames[2:]] + [
         embed_rgb(f, t2)[0] for f in frames[:2]
     ]
@@ -107,7 +95,7 @@ def test_crop_translation_recovered():
     m = _mark(_content())
     ys = [luma_from_rgb(f)[37:, 53:] for f in m]
     d = detect_frames(ys, KEY, P, scales=(1.0,))
-    assert d.watermark_detected and d.identifier_recovered == 0xABC123
+    assert d.watermark_detected
     assert d.offset == ((-37) % 256, (-53) % 256)
 
 
@@ -115,7 +103,7 @@ def test_y_plane_respects_range():
     y = np.clip(np.random.default_rng(0).normal(128, 40, (128, 128)), 0, 255).astype(
         np.uint8
     )
-    out, _ = embed_y(y, build_tables(KEY, P, asset_id=1), lo=16, hi=235)
+    out, _ = embed_y(y, build_tables(KEY, P), lo=16, hi=235)
     # never pushed further outside the nominal range; in-range samples stay in range
     up, down = out.astype(int) > y, out.astype(int) < y
     assert (out[up] <= 235).all() and (out[down] >= 16).all()
@@ -124,17 +112,11 @@ def test_y_plane_respects_range():
 def test_unset_strength_is_rejected():
     with pytest.raises(ValueError):
         FastMarkParams(tau=0.0)
-    with pytest.raises(ValueError):
-        build_tables(
-            KEY, FastMarkParams(period=128), asset_id=1
-        )  # too few payload tiles
 
 
 def test_votes_match_bruteforce():
-    params = FastMarkParams(
-        period=64, tile=16, cell=8, tau=0.05, payload_bits=0, pilot_frac=1.0
-    )
-    t = build_tables(b"key", params, asset_id=7)
+    params = FastMarkParams(period=64, tile=16, cell=8, tau=0.05)
+    t = build_tables(b"key", params)
     rng = np.random.default_rng(1)
     y = rng.normal(128, 20, size=(150, 210)).astype(np.float32)
     acc = FoldAccumulator(t, scales=(1.0,))
@@ -149,7 +131,7 @@ def test_votes_match_bruteforce():
             for ox in range(r[1], 210 - T + 1, T):
                 ky, kx = ((oy - d[0]) % P) // T, ((ox - d[1]) % P) // T
                 s = (
-                    t.base[(np.arange(oy, oy + T) - d[0]) % P][
+                    t.carrier[(np.arange(oy, oy + T) - d[0]) % P][
                         :, (np.arange(ox, ox + T) - d[1]) % P
                     ]
                     * y[oy : oy + T, ox : ox + T]
@@ -160,35 +142,37 @@ def test_votes_match_bruteforce():
         np.testing.assert_allclose(got, expect.ravel(), rtol=1e-4, atol=1e-4)
 
 
-def test_key_resolution(monkeypatch):
-    import base64
-
+def test_key_comes_only_from_the_dedicated_secret(monkeypatch):
     from fastmark import resolve_key
 
     monkeypatch.delenv("FASTMARK_SECRET_KEY", raising=False)
-    monkeypatch.delenv("C2PA_REQUEST_ID_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv("C2PA_REQUEST_ID_ENCRYPTION_KEY", "AAAA")
     assert resolve_key() is None
-    monkeypatch.setenv(
-        "C2PA_REQUEST_ID_ENCRYPTION_KEY", base64.b64encode(b"\x07" * 32).decode()
-    )
-    derived = resolve_key()
-    assert derived is not None and len(derived) == 32
-    assert derived != b"\x07" * 32  # one-way, domain-separated derivation
     monkeypatch.setenv("FASTMARK_SECRET_KEY", "explicit")
-    assert resolve_key() not in (None, derived)
+    key = resolve_key()
+    assert key is not None and len(key) == 32
 
 
-def test_production_presence_mark_detected_without_identifier():
+def test_production_carrier_is_pinned():
+    """Changing the carrier makes every delivered clip undetectable."""
+    from fastmark import production_tables
+
+    tables = production_tables(KEY)
+    digest = hashlib.sha256(tables.carrier.tobytes()).hexdigest()
+    assert digest == "ab5e0c61f9aa839a098ab0dc60482cb1e51a7dd85715592a270f84e2b7f69815"
+    assert tables.tau_int == 360
+
+
+def test_production_presence_mark_detected():
     from fastmark import PRODUCTION_PARAMS, production_tables
 
     tables = production_tables(KEY)
-    assert tables.pilot_mask.all() and tables.codeword is None
     rng = np.random.default_rng(3)
     y = np.clip(rng.normal(128, 30, (1024, 1024)), 16, 235).astype(np.uint8)
     marked, stats = embed_y(y, tables)
     assert stats.tiles_changed > 0
     d = detect_frames([marked], KEY, PRODUCTION_PARAMS, scales=(1.0,))
-    assert d.watermark_detected and d.identifier_recovered is None
+    assert d.watermark_detected
     assert not detect_frames(
         [y], KEY, PRODUCTION_PARAMS, scales=(1.0,)
     ).watermark_detected
