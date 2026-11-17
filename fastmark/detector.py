@@ -25,6 +25,7 @@ from __future__ import annotations
 import itertools
 import math
 from dataclasses import dataclass, field
+from statistics import NormalDist
 
 import numpy as np
 
@@ -180,16 +181,24 @@ class FoldAccumulator:
 
 
 def _log10_binom_sf(k: int, n: int) -> float:
-    from scipy.stats import binom
-
-    return float(binom.logsf(k - 1, n, 0.5)) / math.log(10)
+    """log10 P(X >= k) for X ~ Binomial(n, 1/2)."""
+    if k <= 0:
+        return 0.0
+    if k > n:
+        return -math.inf
+    lgn = math.lgamma(n + 1)
+    terms = [lgn - math.lgamma(i + 1) - math.lgamma(n - i + 1) for i in range(k, n + 1)]
+    top = max(terms)
+    log_sf = top + math.log(sum(math.exp(t - top) for t in terms)) - n * math.log(2)
+    return min(0.0, log_sf / math.log(10))
 
 
 def _z_from_log10(lt: float) -> float:
-    from scipy.special import ndtri
-
     if lt > -300:
-        return float(-ndtri(10.0**lt))
+        p = 10.0**lt
+        if p >= 1.0:
+            return -math.inf
+        return -NormalDist().inv_cdf(p)
     return math.sqrt(-2 * lt * math.log(10))
 
 

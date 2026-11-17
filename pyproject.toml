@@ -14,8 +14,8 @@ dependencies = ["numpy>=1.24"]
 # The CUDA embedder compiles with the libnvrtc that torch ships.
 cuda = ["torch>=2.4"]
 # The blind detector runs on CPU.
-detect = ["scipy>=1.10"]
-test = ["pytest>=8", "opencv-python-headless>=4.8", "scipy>=1.10"]
+detect = ["opencv-python-headless>=4.8"]
+test = ["pytest>=8", "opencv-python-headless>=4.8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["fastmark"]
