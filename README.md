@@ -39,7 +39,10 @@ marker.embed_yuv420p(packed_frames)  # in place, before the device-to-host copy
 pip install "fastmark @ git+https://github.com/fal-ai-community/fastmark.git@<sha>"
 ```
 
-The fal registry pins it by commit in the MiniMax H3 Max requirements.
+The package is importable straight from a checkout root (no install step). The
+fal registry's MiniMax H3 Max apps clone a pinned commit during setup with
+`GITHUB_FALCOMMUNITY_TOKEN` and put it on `PYTHONPATH` for the GPU ranks,
+because this repository is private and the env build has no git credentials.
 
 ## Tests
 
